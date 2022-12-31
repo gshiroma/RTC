@@ -87,6 +87,9 @@ rdr2geo_options:
 # Group of processing options
 processing_options:
 
+   # Multilook in amplitude rather than intensity
+   multilook_in_amplitude: bool(required=False)
+
    # Check if ancillary inputs cover entirely the output product
    check_ancillary_inputs_coverage: bool(required=False)
 

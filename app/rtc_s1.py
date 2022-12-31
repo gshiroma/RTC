@@ -67,6 +67,29 @@ def _update_mosaic_boundaries(mosaic_geogrid_dict, geogrid):
         assert(mosaic_geogrid_dict['epsg'] == geogrid.epsg)
 
 
+def _compute_intensity_from_amplitude(filename, logger):
+    """Compute backscatter intensity from amplitude
+
+       Parameters
+       ----------
+       filename : str
+              Radar amplitude raster filename
+       logger : loggin.Logger
+              Logger
+    """
+    logger.info(f'computing backscatter intensity from amplitude')
+    gdal_ds = gdal.Open(filename, gdal.GA_Update)
+    num_bands = gdal_ds.RasterCount
+
+    for b in range(num_bands):
+        gdal_band = gdal_ds.GetRasterBand(b + 1)
+        band_image = gdal_band.ReadAsArray()
+        gdal_band.WriteArray(band_image ** 2)
+        gdal_band.FlushCache()
+        del gdal_band
+    logger.info(f'file updated: {filename}')
+
+
 def _separate_pol_channels(multi_band_file, output_file_list, logger,
                            output_raster_format):
     """Save a multi-band raster file as individual single-band files
@@ -177,7 +200,8 @@ def apply_slc_corrections(burst_in: Sentinel1BurstSlc,
                           path_slc_out: str,
                           flag_output_complex: bool = False,
                           flag_thermal_correction: bool = True,
-                          flag_apply_abs_rad_correction: bool = True):
+                          flag_apply_abs_rad_correction: bool = True,
+                          flag_multilook_in_amplitude: bool = True):
     '''Apply thermal correction stored in burst_in. Save the corrected signal
     back to ENVI format. Preserves the phase.'''
 
@@ -186,7 +210,7 @@ def apply_slc_corrections(burst_in: Sentinel1BurstSlc,
     slc_gdal_ds = gdal.Open(path_slc_vrt)
     arr_slc_from = slc_gdal_ds.ReadAsArray()
 
-    # Apply the correction
+    # Apply thermal noise correction
     if flag_thermal_correction:
         logger.info(f'    applying thermal noise correction to burst SLC')
         corrected_image = np.abs(arr_slc_from) ** 2 - burst_in.thermal_noise_lut
@@ -197,21 +221,23 @@ def apply_slc_corrections(burst_in: Sentinel1BurstSlc,
     else:
         corrected_image=np.abs(arr_slc_from) ** 2
 
+    # Apply absolute radiometric correction
     if flag_apply_abs_rad_correction:
         logger.info(f'    applying absolute radiometric correction to burst SLC')
+        corrected_image = \
+            corrected_image / burst_in.burst_calibration.beta_naught ** 2
+
+    if flag_multilook_in_amplitude:
+        corrected_image=np.sqrt(corrected_image)
+ 
+    # Output as complex
     if flag_output_complex:
         factor_mag = np.sqrt(corrected_image) / np.abs(arr_slc_from)
         factor_mag[np.isnan(factor_mag)] = 0.0
         corrected_image = arr_slc_from * factor_mag
         dtype = gdal.GDT_CFloat32
-        if flag_apply_abs_rad_correction:
-            corrected_image = \
-                corrected_image / burst_in.burst_calibration.beta_naught
     else:
         dtype = gdal.GDT_Float32
-        if flag_apply_abs_rad_correction:
-            corrected_image = \
-                corrected_image / burst_in.burst_calibration.beta_naught ** 2
 
     # Save the corrected image
     drvout = gdal.GetDriverByName('GTiff')
@@ -355,6 +381,8 @@ def run(cfg: RunConfig):
 
     # unpack processing parameters
     processing_namespace = cfg.groups.processing
+    flag_multilook_in_amplitude = \
+        processing_namespace.multilook_in_amplitude
     dem_interp_method_enum = \
         processing_namespace.dem_interpolation_method_enum
     flag_apply_rtc = processing_namespace.apply_rtc
@@ -511,7 +539,8 @@ def run(cfg: RunConfig):
     threshold = cfg.geo2rdr_params.threshold
     maxiter = cfg.geo2rdr_params.numiter
     exponent = 1 if (flag_apply_thermal_noise_correction or
-                     flag_apply_abs_rad_correction) else 2
+                     flag_apply_abs_rad_correction or
+                     flag_multilook_in_amplitude) else 2
 
     # output mosaics variables
     geo_filename = f'{output_dir}/'f'{product_prefix}.{imagery_extension}'
@@ -618,7 +647,8 @@ def run(cfg: RunConfig):
             burst_pol.slc_to_vrt_file(temp_slc_path)
 
             if (flag_apply_thermal_noise_correction or
-                    flag_apply_abs_rad_correction):
+                    flag_apply_abs_rad_correction or
+                    flag_multilook_in_amplitude):
                 apply_slc_corrections(
                     burst_pol,
                     temp_slc_path,
@@ -857,6 +887,9 @@ def run(cfg: RunConfig):
                                ' was disabled.')
 
         del geo_burst_raster
+
+        if flag_multilook_in_amplitude:
+            _compute_intensity_from_amplitude(geo_burst_filename, logger)
 
         # Output imagery list contains multi-band files that
         # will be used for mosaicking

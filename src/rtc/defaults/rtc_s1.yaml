@@ -69,6 +69,9 @@ runconfig:
 
         processing:
 
+            # Multilook in amplitude rather than intensity
+            multilook_in_amplitude: False
+
             # Check if ancillary inputs cover entirely the output product
             check_ancillary_inputs_coverage: True
 
