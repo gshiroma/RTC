@@ -67,7 +67,7 @@ def _update_mosaic_boundaries(mosaic_geogrid_dict, geogrid):
         assert(mosaic_geogrid_dict['epsg'] == geogrid.epsg)
 
 
-def _compute_intensity_from_amplitude(filename, logger):
+def _apply_math_function(filename, logger, function, *args, **kwargs):
     """Compute backscatter intensity from amplitude
 
        Parameters
@@ -76,6 +76,12 @@ def _compute_intensity_from_amplitude(filename, logger):
               Radar amplitude raster filename
        logger : loggin.Logger
               Logger
+       function : numpy.ufunc
+              Numpy function
+       *args
+              Variable length argument list to be passed to the math function.
+       **kwargs
+              Arbitrary keyword arguments to be passed to the math function. 
     """
     logger.info(f'computing backscatter intensity from amplitude')
     gdal_ds = gdal.Open(filename, gdal.GA_Update)
@@ -84,9 +90,11 @@ def _compute_intensity_from_amplitude(filename, logger):
     for b in range(num_bands):
         gdal_band = gdal_ds.GetRasterBand(b + 1)
         band_image = gdal_band.ReadAsArray()
-        gdal_band.WriteArray(band_image ** 2)
+        new_band_image = function(band_image, *args, **kwargs)
+        gdal_band.WriteArray(new_band_image)
         gdal_band.FlushCache()
         del gdal_band
+
     logger.info(f'file updated: {filename}')
 
 
@@ -201,7 +209,7 @@ def apply_slc_corrections(burst_in: Sentinel1BurstSlc,
                           flag_output_complex: bool = False,
                           flag_thermal_correction: bool = True,
                           flag_apply_abs_rad_correction: bool = True,
-                          flag_multilook_in_amplitude: bool = True):
+                          flag_multilook_in_amplitude: bool = False):
     '''Apply thermal correction stored in burst_in. Save the corrected signal
     back to ENVI format. Preserves the phase.'''
 
@@ -656,7 +664,8 @@ def run(cfg: RunConfig):
                     flag_output_complex=False,
                     flag_thermal_correction =
                         flag_apply_thermal_noise_correction,
-                    flag_apply_abs_rad_correction=True)
+                    flag_apply_abs_rad_correction=True,
+                    flag_multilook_in_amplitude=flag_multilook_in_amplitude)
                 input_burst_filename = temp_slc_corrected_path
                 temp_files_list.append(temp_slc_corrected_path)
             else:
@@ -746,6 +755,7 @@ def run(cfg: RunConfig):
 
         # geocoding optional arguments
         geocode_kwargs = {}
+        geocode_other_kwargs = {}
 
         # Calculate layover/shadow mask when requested
         if save_layover_shadow_mask or apply_shadow_masking:
@@ -817,6 +827,43 @@ def run(cfg: RunConfig):
 
             sub_swaths.set_valid_samples_array(1, valid_samples_sub_swath)
 
+            if flag_multilook_in_amplitude:
+                if memory_mode == isce3.core.GeocodeMemoryMode.Auto:
+                    rtc_memory_mode = isce3.core.MemoryModeBlocksY.AutoBlocksY
+                elif memory_mode == isce3.core.GeocodeMemoryMode.SingleBlock:
+                    rtc_memory_mode = isce3.core.MemoryModeBlocksY.SingleBlockY
+                else:
+                    rtc_memory_mode = isce3.core.MemoryModeBlocksY.MultipleBlocksY
+
+                rtc_out_temp_file = os.path.join(f'{burst_scratch_path}', 'rtc.tif')
+
+                rtc_temp_raster = isce3.io.Raster(
+                    rtc_out_temp_file, radar_grid.width, radar_grid.length, 1,
+                    gdal.GDT_Float32, 'GTiff')
+
+                isce3.geometry.compute_rtc(radar_grid=radar_grid,
+                                           orbit=orbit,
+                                           input_dop=zero_doppler,
+                                           dem=dem_raster,
+                                           output_raster=rtc_temp_raster,
+                                           geogrid_upsampling=rtc_upsampling,
+                                           input_terrain_radiometry=input_terrain_radiometry,
+                                           output_terrain_radiometry=output_terrain_radiometry,
+                                           rtc_algorithm=rtc_algorithm,
+                                           interp_method=dem_interp_method_enum,
+                                           rtc_memory_mode=rtc_memory_mode)
+
+                # flush rtc_temp_raster values to the disk
+                del rtc_temp_raster
+
+                # convert RTC ANF from intensity to amplitude
+                _apply_math_function(rtc_out_temp_file, logger, np.sqrt)
+
+                # re-create ISCE3 Raster object from rtc_out_temp_file
+                rtc_temp_raster = isce3.io.Raster(rtc_out_temp_file)
+                geocode_kwargs['input_rtc'] = rtc_temp_raster
+                geocode_other_kwargs['input_rtc'] = rtc_temp_raster
+
             # geocode
             try:
                 geo_obj.geocode(radar_grid=radar_grid,
@@ -839,8 +886,8 @@ def run(cfg: RunConfig):
                                 # out_off_diag_terms=out_off_diag_terms_obj,
                                 out_geo_nlooks=out_geo_nlooks_obj,
                                 out_geo_rtc=out_geo_rtc_obj,
-                                input_rtc=None,
-                                output_rtc=None,
+                                # input_rtc=None,
+                                # output_rtc=None,
                                 dem_interp_method=dem_interp_method_enum,
                                 memory_mode=memory_mode,
                                 sub_swaths=sub_swaths,
@@ -876,10 +923,11 @@ def run(cfg: RunConfig):
                             # out_off_diag_terms=out_off_diag_terms_obj,
                             out_geo_nlooks=out_geo_nlooks_obj,
                             out_geo_rtc=out_geo_rtc_obj,
-                            input_rtc=None,
-                            output_rtc=None,
+                            # input_rtc=None,
+                            # output_rtc=None,
                             dem_interp_method=dem_interp_method_enum,
-                            memory_mode=memory_mode)
+                            memory_mode=memory_mode,
+                            **geocode_other_kwargs)
 
             if flag_inform_user_about_sub_swaths_error:
                 logger.warning('WARNING the sub-swath masking is not available'
@@ -889,7 +937,8 @@ def run(cfg: RunConfig):
         del geo_burst_raster
 
         if flag_multilook_in_amplitude:
-            _compute_intensity_from_amplitude(geo_burst_filename, logger)
+            del rtc_temp_raster
+            _apply_math_function(geo_burst_filename, logger, np.power, 2)
 
         # Output imagery list contains multi-band files that
         # will be used for mosaicking
