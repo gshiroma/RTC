@@ -83,7 +83,7 @@ def save_as_cog(filename, scratch_dir='.', logger=None,
         logger = logging.getLogger('rtc_s1')
 
     logger.info('        COG step 1: add overviews')
-    gdal_ds = gdal.Open(filename, gdal.GA_Update)
+    gdal_ds = gdal.OpenEx(filename, gdal.GA_Update, open_options=["IGNORE_COG_LAYOUT_BREAK=YES"])
     gdal_dtype = gdal_ds.GetRasterBand(1).DataType
     dtype_name = gdal.GetDataTypeName(gdal_dtype).lower()
 

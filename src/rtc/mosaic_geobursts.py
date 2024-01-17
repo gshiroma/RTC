@@ -623,13 +623,13 @@ def mosaic_single_output_file(list_rtc_images, list_nlooks, mosaic_filename,
 
     for i_band in range(num_bands):
         gdal_band = raster_out.GetRasterBand(i_band+1)
-        gdal_band.WriteArray(arr_numerator[i_band])
         gdal_band.SetDescription(description_list[i_band])
         if ctable is not None:
             gdal_band.SetRasterColorTable(ctable)
             gdal_band.SetRasterColorInterpretation(gdal.GCI_PaletteIndex)
         if no_data_value is not None:
             gdal_band.SetNoDataValue(no_data_value)
+        gdal_band.WriteArray(arr_numerator[i_band])
 
     band_ds = None
     reference_raster = None
